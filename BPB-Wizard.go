@@ -5,6 +5,7 @@ import (
 	"bytes"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -20,53 +21,30 @@ import (
 	"github.com/google/uuid"
 )
 
-type KVNamespaceBinding struct {
-	Binding string `json:"binding"`
-	Id      string `json:"id"`
-}
-
 type KVNamespace struct {
 	Title string `json:"title"`
 	ID    string `json:"id"`
 }
 
-type WranglerConfig struct {
-	Name                string               `json:"name"`
-	Main                string               `json:"main"`
-	Compatibility_date  string               `json:"compatibility_date"`
-	Compatibility_flags []string             `json:"compatibility_flags"`
-	Workers_dev         bool                 `json:"workers_dev"`
-	Kv_namespaces       []KVNamespaceBinding `json:"kv_namespaces"`
-	Vars                workerSettings       `json:"vars"`
-}
-
-type workerSettings struct {
-	Uuid     string `json:"UUID"`
-	TrPass   string `json:"TR_PASS"`
-	ProxyIP  string `json:"PROXY_IP"`
-	Fallback string `json:"FALLBACK"`
-	SubPath  string `json:"SUB_PATH"`
-}
-
 var (
-	kvID       string
-	workerName string
-	UUID       string
-	TR_PASS    string
-	PROXY_IP   string
-	FALLBACK   string
-	SUB_PATH   string
-	red        = "\033[31m"
-	green      = "\033[32m"
-	reset      = "\033[0m"
-	orange     = "\033[38;2;255;165;0m"
-	blue       = "\033[94m"
-	bold       = "\033[1m"
-	errMark    = bold + red + "✗" + reset
-	succMark   = bold + green + "✓" + reset
-	title      = bold + blue + "●" + reset
-	ask        = bold + "-" + reset
-	info       = bold + "+" + reset
+	kvID         string
+	projectName  string
+	customDomain string
+	deployType   string
+	UUID         string
+	TR_PASS      string
+	PROXY_IP     string
+	FALLBACK     string
+	SUB_PATH     string
+	red          = "\033[31m"
+	green        = "\033[32m"
+	reset        = "\033[0m"
+	orange       = "\033[38;2;255;165;0m"
+	blue         = "\033[94m"
+	bold         = "\033[1m"
+	title        = bold + blue + "●" + reset
+	ask          = bold + "-" + reset
+	info         = bold + "+" + reset
 )
 
 //go:embed bundles/node-v22.14.0-win-x64.zip
@@ -78,7 +56,7 @@ var embeddedWranglerZip []byte
 func main() {
 
 	if runtime.GOOS != "windows" {
-		fmt.Printf("%s Unsupported OS. This script is for Windows only.\n", errMark)
+		failMessage("Unsupported OS. This script is for Windows only.", nil)
 		return
 	}
 
@@ -88,7 +66,18 @@ func main() {
 	nodeZipPath := filepath.Join(os.TempDir(), "node-v22.14.0-win-x64.zip")
 	wranglerZipPath := filepath.Join(os.TempDir(), "wrangler.zip")
 	workerURL := "https://github.com/bia-pain-bache/BPB-Worker-Panel/releases/latest/download/worker.js"
-	workerPath := filepath.Join(installDir, "worker.js")
+	srsPath := filepath.Join(installDir, "src")
+
+	if _, err := os.Stat(wranglerConfigPath); !errors.Is(err, os.ErrNotExist) {
+		if err := os.Remove(wranglerConfigPath); err != nil {
+			failMessage("Error deleting old worker config.", err)
+			return
+		}
+	}
+
+	if err := os.RemoveAll(srsPath); err != nil {
+		failMessage("Error deleting old worker.js file.", err)
+	}
 
 	currentPath := os.Getenv("PATH")
 	newPath := fmt.Sprintf("%s;%s", nodeDir, currentPath)
@@ -98,7 +87,7 @@ func main() {
 	}
 	fmt.Printf("\n%s Installing %sBPB Wizard%s...\n", title, blue, reset)
 
-	if _, err := runCommand(installDir, "npx", "wrangler", "-v"); err != nil {
+	if _, err := runCommand(installDir, "npx wrangler -v"); err != nil {
 		if err := os.WriteFile(nodeZipPath, embeddedNodeZip, 0644); err != nil {
 			failMessage("Error copying Node.js", err)
 			return
@@ -109,7 +98,7 @@ func main() {
 			return
 		}
 
-		fmt.Printf("%s Files copied successfuly.\n", succMark)
+		successMessage("Files copied successfuly.")
 		if err := unzip(nodeZipPath, installDir); err != nil {
 			failMessage("Error extracting Node.js", err)
 			return
@@ -124,51 +113,61 @@ func main() {
 		successMessage("BPB Wizard is already installed!")
 	}
 
-	fmt.Printf("\n%s Downloading %sworker.js%s...\n", title, green, reset)
-	for {
-		if err := downloadFile(workerURL, workerPath); err != nil {
-			failMessage("Error downloading worker.js", err)
-			if response := promptUser("Would you like to try again? (y/n): "); strings.ToLower(response) == "n" {
-				return
-			}
-			continue
-		}
-		successMessage("Worker downloaded successfully!")
-		break
-	}
-
 	fmt.Printf("\n%s Login %sCloudflare%s...\n", title, orange, reset)
 	for {
-		if _, err := runCommand(installDir, "npx", "wrangler", "login"); err != nil {
+		if _, err := runCommand(installDir, "npx wrangler login"); err != nil {
 			failMessage("Error logging into Cloudflare", err)
 			if response := promptUser("Would you like to try again? (y/n): "); strings.ToLower(response) == "n" {
 				return
 			}
 			continue
 		}
+
+		if _, err := runCommand(installDir, "npx wrangler telemetry disable"); err != nil {
+			failMessage("Error disabling telemetry.", err)
+			return
+		}
+
 		successMessage("Cloudflare logged in successfully!")
 		break
 	}
 
 	fmt.Printf("\n%s Get Worker settings...\n", title)
-	var prompt string
+
+	fmt.Printf("\n%s You can use %sWorkers%s or %sPages%s to deploy.\n", info, green, reset, green, reset)
+	fmt.Printf("%s %sWarning%s: If you choose %sPages%s, you can not modify settings like UUID from Cloudflare dashboard later, you have to modify it from here.\n", info, red, reset, green, reset)
+	fmt.Printf("%s %sWarning%s: If you choose %sPages%s, sometimes it takes about 5 minutes until you can open panel, so please keep calm!\n", info, red, reset, green, reset)
 	for {
-		workerName = generateRandomDomain(32)
-		fmt.Printf("\n%s The random generated worker name (%sSubdomain%s) is: %s%s%s\n", info, green, reset, orange, workerName, reset)
-		if response := promptUser("Please enter a custom worker name or press ENTER to use generated one: "); response != "" {
-			if strings.Contains(strings.ToLower(response), "bpb") {
-				fmt.Printf("%s Worker name cannot contain %sbpb%s! Please try another name.\n", errMark, red, reset)
-				continue
-			}
-			workerName = response
+		response := promptUser("Please enter 1 for Workers or 2 for Pages deployment: ")
+		if !(response == "1" || response == "2") {
+			failMessage("Wrong selection, Please choose 1 or 2 only!", nil)
+			continue
 		}
 
-		if resp := isWorkerAvailable(installDir, workerName); resp {
-			prompt = fmt.Sprintf("This worker already exists! This will %sRESET%s all panel settings, would you like to override it? (y/n): ", red, reset)
+		deployType = response
+		break
+	}
+
+	for {
+		projectName = generateRandomDomain(32)
+		fmt.Printf("\n%s The random generated worker name (%sSubdomain%s) is: %s%s%s\n", info, green, reset, orange, projectName, reset)
+		if response := promptUser("Please enter a custom worker name or press ENTER to use generated one: "); response != "" {
+			if strings.Contains(strings.ToLower(response), "bpb") {
+				message := fmt.Sprintf("Worker name cannot contain %sbpb%s! Please try another name.", red, reset)
+				failMessage(message, nil)
+				continue
+			}
+			projectName = response
+		}
+
+		fmt.Printf("\n%s Checking domain availablity...\n", title)
+		if resp := isWorkerAvailable(installDir, projectName, deployType); resp {
+			prompt := fmt.Sprintf("This worker already exists! This will %sRESET%s all panel settings, would you like to override it? (y/n): ", red, reset)
 			if response := promptUser(prompt); strings.ToLower(response) == "n" {
 				continue
 			}
 		}
+		successMessage("Available!")
 		break
 	}
 
@@ -202,11 +201,38 @@ func main() {
 		SUB_PATH = response
 	}
 
+	fmt.Printf("\n%s You can set %sCustom domain%s ONLY if you registered domain on this cloudflare account.\n", info, green, reset)
+	if response := promptUser("Please enter a custom domain (if you have any) or press ENTER to ignore: "); response != "" {
+		customDomain = response
+	}
+
+	fmt.Printf("\n%s Downloading %sworker.js%s...\n", title, green, reset)
+	if err := os.Mkdir(srsPath, 0750); err != nil {
+		failMessage("Could not create src directory", err)
+		return
+	}
+
+	var workerPath = filepath.Join(srsPath, "worker.js")
+	if deployType == "2" {
+		workerPath = filepath.Join(srsPath, "_worker.js")
+	}
+	for {
+		if err := downloadFile(workerURL, workerPath); err != nil {
+			failMessage("Error downloading worker.js", err)
+			if response := promptUser("Would you like to try again? (y/n): "); strings.ToLower(response) == "n" {
+				return
+			}
+			continue
+		}
+		successMessage("Worker downloaded successfully!")
+		break
+	}
+
 	fmt.Printf("\n%s Creating KV namespace...\n", title)
 	for {
 		now := time.Now().Format("2006-01-02_15-04-05")
 		kvName := fmt.Sprintf("panel-kv-%s", now)
-		output, err := runCommand(installDir, "npx", "wrangler", "kv", "namespace", "create", kvName)
+		output, err := runCommand(installDir, "npx wrangler kv namespace create "+kvName)
 		if err != nil {
 			failMessage("Error creating KV!", err)
 			if response := promptUser("Would you like to try again? (y/n): "); strings.ToLower(response) == "n" {
@@ -226,46 +252,56 @@ func main() {
 	}
 	successMessage("KV created successfully!")
 
-	fmt.Printf("\n%s Building worker configuration...\n", title)
-	if err := buildWranglerConfig(wranglerConfigPath, workerPath); err != nil {
+	fmt.Printf("\n%s Building panel configuration...\n", title)
+	if err := buildWranglerConfig(wranglerConfigPath); err != nil {
 		failMessage("Error building Wrangler configuration", err)
 		return
 	}
-	successMessage("Worker configuration built successfully!")
+	successMessage("Panel configuration built successfully!")
 
 	for {
-		fmt.Printf("\n%s Deploying worker...\n", title)
-		output, err := runCommand(installDir, "npx", "wrangler", "deploy", workerPath)
-		if err != nil {
-			failMessage("Error deploying worker", err)
+		fmt.Printf("\n%s Deploying %sBPB Panel%s...\n", title, blue, reset)
+		if deployType == "1" {
+			output, err := runCommand(installDir, "npx wrangler deploy")
+			if err != nil {
+				failMessage("Error deploying Panel", err)
+				if response := promptUser("Would you like to try again? (y/n): "); strings.ToLower(response) == "n" {
+					return
+				}
+				continue
+			}
+
+			successMessage("Panel deployed successfully!")
+			launchPanel(output)
+			break
+		}
+
+		if _, err := runCommand(installDir, "npx wrangler pages project create "+projectName+" --production-branch production"); err != nil {
+			failMessage("Error creating Pages project", err)
 			if response := promptUser("Would you like to try again? (y/n): "); strings.ToLower(response) == "n" {
 				return
 			}
 			continue
 		}
-		successMessage("Worker deployed successfully!")
 
-		prompt := fmt.Sprintf("Would you like to open %sBPB panel%s in browser? (y/n): ", blue, reset)
-		if response := promptUser(prompt); strings.ToLower(response) == "n" {
-			return
-		}
-
-		url, err := extractURL(output)
+		_, err := runCommand(installDir, "npx wrangler pages deploy --commit-dirty true --branch production")
 		if err != nil {
-			failMessage("Error getting URL", err)
-			return
+			failMessage("Error deploying Panel", err)
+			if response := promptUser("Would you like to try again? (y/n): "); strings.ToLower(response) == "n" {
+				return
+			}
+			continue
 		}
 
-		if err := openURL(url + "/panel"); err != nil {
-			failMessage("Error opening URL in browser", err)
-			return
-		}
+		successMessage("Panel deployed successfully!")
+		launchPanel("")
 		break
 	}
 }
 
-func runCommand(cmdDir string, command string, args ...string) (string, error) {
-	cmd := exec.Command(command, args...)
+func runCommand(cmdDir string, command string) (string, error) {
+	c := strings.Split(command, " ")
+	cmd := exec.Command(c[0], c[1:]...)
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
@@ -292,7 +328,7 @@ func generateRandomString(charSet string, length int, isDomain bool) string {
 	for i := range randomBytes {
 		for {
 			char := charSet[r.Intn(len(charSet))]
-			if isDomain && (i == 1 || i == length) && char == byte('-') {
+			if isDomain && (i == 0 || i == length-1) && char == byte('-') {
 				continue
 			}
 			randomBytes[i] = char
@@ -318,12 +354,16 @@ func generateSubURIPath(uriLength int) string {
 	return generateRandomString(charset, uriLength, false)
 }
 
-func isWorkerAvailable(installDir string, workerName string) bool {
-	if _, err := runCommand(installDir, "npx", "wrangler", "deployments", "list", "--name", workerName); err == nil {
-		return true
+func isWorkerAvailable(installDir, projectName, deployType string) bool {
+	var command string
+	if deployType == "1" {
+		command = "npx wrangler deployments list --name " + projectName
+	} else {
+		command = "npx wrangler pages deployment list --project-name " + projectName
 	}
 
-	return false
+	_, err := runCommand(installDir, command)
+	return err == nil
 }
 
 func extractURL(output string) (string, error) {
@@ -335,23 +375,41 @@ func extractURL(output string) (string, error) {
 	return url, nil
 }
 
-func buildWranglerConfig(filePath string, workerPath string) error {
-	config := WranglerConfig{
-		Name:                workerName,
-		Main:                workerPath,
-		Compatibility_date:  time.Now().AddDate(0, 0, -1).Format("2006-01-02"),
-		Compatibility_flags: []string{"nodejs_compat"},
-		Workers_dev:         true,
-		Kv_namespaces: []KVNamespaceBinding{
-			{Binding: "kv", Id: kvID},
+func buildWranglerConfig(filePath string) error {
+
+	config := map[string]any{
+		"name":                projectName,
+		"compatibility_date":  time.Now().AddDate(0, 0, -1).Format("2006-01-02"),
+		"compatibility_flags": []string{"nodejs_compat"},
+		"kv_namespaces": []map[string]string{
+			{
+				"binding": "kv",
+				"id":      kvID,
+			},
 		},
-		Vars: workerSettings{
-			Uuid:     UUID,
-			TrPass:   TR_PASS,
-			ProxyIP:  PROXY_IP,
-			Fallback: FALLBACK,
-			SubPath:  SUB_PATH,
+		"vars": map[string]string{
+			"UUID":     UUID,
+			"TR_PASS":  TR_PASS,
+			"PROXY_IP": PROXY_IP,
+			"FALLBACK": FALLBACK,
+			"SUB_PATH": SUB_PATH,
 		},
+	}
+
+	if deployType == "1" {
+		config["main"] = "./src/worker.js"
+		config["workers_dev"] = true
+	} else {
+		config["pages_build_output_dir"] = "./src/"
+	}
+
+	if customDomain != "" {
+		config["workers_dev"] = []map[string]any{
+			{
+				"custom_domain": true,
+				"pattern":       customDomain,
+			},
+		}
 	}
 
 	jsonData, err := json.MarshalIndent(config, "", "  ")
@@ -372,11 +430,11 @@ func findMatch(pattern string, input string) (string, error) {
 		return "", err
 	}
 
-	match := re.FindString(input)
-	if match == "" {
-		return "", fmt.Errorf("no match found")
+	matches := re.FindAllString(input, -1)
+	if len(matches) == 0 {
+		return "", fmt.Errorf("no matches found")
 	}
-	return match, nil
+	return matches[len(matches)-1], nil
 }
 
 func extractKvID(output string) (string, error) {
@@ -466,9 +524,42 @@ func openURL(url string) error {
 }
 
 func failMessage(message string, err error) {
-	fmt.Printf("%s %s: %s\n", errMark, message, err)
+	errMark := bold + red + "✗" + reset
+	if err != nil {
+		message += ": " + err.Error()
+	}
+	fmt.Printf("%s %s\n", errMark, message)
 }
 
 func successMessage(message string) {
+	succMark := bold + green + "✓" + reset
 	fmt.Printf("%s %s\n", succMark, message)
+}
+
+func launchPanel(output string) {
+	prompt := fmt.Sprintf("Would you like to open %sBPB panel%s in browser? (y/n): ", blue, reset)
+	if response := promptUser(prompt); strings.ToLower(response) == "n" {
+		return
+	}
+
+	var panelURL string
+	if customDomain == "" {
+		if deployType == "1" {
+			url, err := extractURL(output)
+			if err != nil {
+				failMessage("Error getting URL", err)
+				return
+			}
+			panelURL = url + "/panel"
+		} else {
+			panelURL = "https://" + projectName + ".pages.dev/panel"
+		}
+	} else {
+		panelURL = "https://" + customDomain + "/panel"
+	}
+
+	if err := openURL(panelURL); err != nil {
+		failMessage("Error opening URL in browser", err)
+		return
+	}
 }

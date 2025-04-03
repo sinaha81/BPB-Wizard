@@ -1,7 +1,7 @@
 name: Build BPB-Wizard
 
 env:
-  RELEASE_VERSION: v1.1
+  RELEASE_VERSION: v1.3
 
 permissions:
   contents: write
@@ -34,12 +34,7 @@ jobs:
           mkdir wrangler
           cd wrangler
           npm install wrangler --save-dev
-
-      - name: Setup project
-        run: |
-          Compress-Archive -Path wrangler\* -DestinationPath bundles\wrangler.zip
-          Move-Item -Path wrangler.zip -Destination .
-          Move-Item -Path node-v22.14.0-win-x64.zip -Destination .
+          Compress-Archive -Path .\* -DestinationPath ..\bundles\wrangler.zip
 
       - name: Build for all Windows architectures
         run: .\build.ps1
